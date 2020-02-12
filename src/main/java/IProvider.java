@@ -20,6 +20,7 @@ import com.thomsonreuters.ema.rdm.EmaRdm;
 class AppClient implements OmmProviderClient
 {
     public Vector<Long> itemList = new Vector<Long>();
+    public boolean login = false;
 
     public void onReqMsg(ReqMsg reqMsg, OmmProviderEvent event)
     {
@@ -42,7 +43,13 @@ class AppClient implements OmmProviderClient
     public void onGenericMsg(GenericMsg genericMsg, OmmProviderEvent event){}
     public void onPostMsg(PostMsg postMsg, OmmProviderEvent event){}
     public void onReissue(ReqMsg reqMsg, OmmProviderEvent event){}
-    public void onClose(ReqMsg reqMsg, OmmProviderEvent event){}
+
+    public void onClose(ReqMsg reqMsg, OmmProviderEvent event)
+    {
+        System.out.println("Connection closing");
+        login = false;
+        itemList.clear();
+    }
     public void onAllMsg(Msg msg, OmmProviderEvent event){}
 
     void processLoginRequest(ReqMsg reqMsg, OmmProviderEvent event)
@@ -52,6 +59,8 @@ class AppClient implements OmmProviderClient
                         nameType(EmaRdm.USER_NAME).complete(true).solicited(true).
                         state(OmmState.StreamState.OPEN, OmmState.DataState.OK, OmmState.StatusCode.NONE, "Login accepted"),
                 event.handle() );
+
+        login = true;
     }
 
     void processMarketPriceRequest(ReqMsg reqMsg, OmmProviderEvent event)
@@ -70,15 +79,20 @@ class AppClient implements OmmProviderClient
         fieldList.add( EmaFactory.createFieldEntry().real(30, 9,  OmmReal.MagnitudeType.EXPONENT_0));
         fieldList.add( EmaFactory.createFieldEntry().real(31, 19, OmmReal.MagnitudeType.EXPONENT_0));
 
-        event.provider()
-                .submit( EmaFactory.createRefreshMsg()
-                                .name(reqMsg.name())
-                                .serviceId(reqMsg.serviceId())
-                                .solicited(true)
-                                .state(OmmState.StreamState.OPEN, OmmState.DataState.OK, OmmState.StatusCode.NONE, "Refresh Completed")
-                                .payload(fieldList).complete(true), event.handle() );
+        try {
+            event.provider()
+                    .submit(EmaFactory.createRefreshMsg()
+                            .name(reqMsg.name())
+                            .serviceId(reqMsg.serviceId())
+                            .solicited(true)
+                            .state(OmmState.StreamState.OPEN, OmmState.DataState.OK, OmmState.StatusCode.NONE, "Refresh Completed")
+                            .payload(fieldList).complete(true), event.handle());
 
-        itemList.add(event.handle());
+            itemList.add(event.handle());
+        } catch (Exception e)
+        {
+            System.out.println("update message threw");
+        }
     }
 
     void processInvalidItemRequest(ReqMsg reqMsg, OmmProviderEvent event)
@@ -92,23 +106,22 @@ class AppClient implements OmmProviderClient
 
 public class IProvider
 {
-    public static void main(String[] args)
-    {
-        OmmProvider provider = null;
-        try
-        {
-            AppClient appClient = new AppClient();
-            FieldList fieldList = EmaFactory.createFieldList();
+    static OmmProvider provider = null;
+    static AppClient appClient;
 
-            OmmIProviderConfig config = EmaFactory.createOmmIProviderConfig();
+    public static void publishUpdates() {
+        FieldList fieldList = EmaFactory.createFieldList();
+        //Wait for item requests before publishing on them
+        try {
+            while (appClient.itemList.size() == 0)
+                Thread.sleep(1000);
+        } catch (Exception e)
+        {}
 
-            provider = EmaFactory.createOmmProvider(config.port("14002"), appClient);
-
-            while( appClient.itemList.size() == 0 ) Thread.sleep(1000);
-
-            for( int i = 0; i < 60; i++ )
-            {
+        try {
+            for (int i = 0; i < 60 && appClient.login == true; i++) {
                 for (Long v : appClient.itemList) {
+                    System.out.println("Sending update");
                     fieldList.clear();
                     fieldList.add(EmaFactory.createFieldEntry().real(22, 3991 + i, OmmReal.MagnitudeType.EXPONENT_NEG_2));
                     fieldList.add(EmaFactory.createFieldEntry().real(30, 10 + i, OmmReal.MagnitudeType.EXPONENT_0));
@@ -117,13 +130,33 @@ public class IProvider
                 }
                 Thread.sleep(1000);
             }
+        } catch (Exception e) {
+            System.out.println("throwing while sending update");
         }
-        catch (InterruptedException | OmmException excp)
+    }
+
+    public static void main(String[] args)
+    {
+        try
         {
+            appClient = new AppClient();
+            FieldList fieldList = EmaFactory.createFieldList();
+
+            OmmIProviderConfig config = EmaFactory.createOmmIProviderConfig();
+
+            provider = EmaFactory.createOmmProvider(config.port("14002"), appClient);
+
+            while(true)
+                publishUpdates();
+        }
+        catch (OmmException excp)
+        {
+            System.out.println("Caught exception in main");
             System.out.println(excp.getMessage());
         }
         finally
         {
+            System.out.println("Cleaning up");
             if (provider != null) provider.uninitialize();
         }
     }
